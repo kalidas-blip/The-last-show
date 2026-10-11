@@ -1,0 +1,138 @@
+
+name: Build The Last Show APK
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: "4.3"
+
+jobs:
+  build-android:
+    name: Export Android APK
+    runs-on: ubuntu-24.04
+
+    container:
+      image: barichello/godot-ci:4.3
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Find project and verify Android preset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_FILE="$(find . -maxdepth 5 -type f \
+            -name project.godot \
+            -not -path './.git/*' \
+            -print -quit)"
+
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "::error::Cannot find project.godot. Upload your Godot project to this repository."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT_FILE")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          PRESETS="$PROJECT_DIR/export_presets.cfg"
+
+          if [ ! -f "$PRESETS" ]; then
+            echo "::error::Missing export_presets.cfg. Create an Android export preset in Godot and upload this file."
+            exit 1
+          fi
+
+          if ! grep -q '^name="Android"$' "$PRESETS" || \
+             ! grep -q '^platform="Android"$' "$PRESETS"; then
+            echo "::error::An Android export preset named exactly Android is required."
+            echo "Presets found:"
+            grep -E '^\[preset\.|^name=|^platform=' "$PRESETS" || true
+            exit 1
+          fi
+
+          echo "Project found at: $PROJECT_DIR"
+          echo "Android export preset found."
+
+      - name: Configure Godot export environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TEMPLATE_SRC="/root/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          TEMPLATE_DEST="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+
+          mkdir -p "$HOME/.local/share/godot/export_templates"
+
+          if [ "$TEMPLATE_SRC" != "$TEMPLATE_DEST" ] && \
+             [ ! -f "$TEMPLATE_DEST/android_debug.apk" ]; then
+            if [ ! -d "$TEMPLATE_SRC" ]; then
+              echo "::error::Godot Android export templates were not found."
+              exit 1
+            fi
+            cp -a "$TEMPLATE_SRC" "$HOME/.local/share/godot/export_templates/"
+          fi
+
+          if [ ! -f "$TEMPLATE_DEST/android_debug.apk" ]; then
+            echo "::error::Android debug export template is missing."
+            exit 1
+          fi
+
+          if [ ! -x /usr/lib/android-sdk/platform-tools/adb ]; then
+            echo "::error::Android SDK is missing from the CI container."
+            exit 1
+          fi
+
+          if [ ! -f /root/debug.keystore ]; then
+            echo "::error::Debug signing key is missing."
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.config/godot"
+
+          cat > "$HOME/.config/godot/editor_settings-4.3.tres" <<'EOF'
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/java_sdk_path = "/usr/lib/jvm/java-17-openjdk-amd64"
+          export/android/android_sdk_path = "/usr/lib/android-sdk"
+          export/android/debug_keystore = "/root/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+
+          godot --version
+          java -version
+
+      - name: Import project assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          godot --headless --path "$PROJECT_DIR" --import
+
+      - name: Export APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/build"
+
+          godot --headless --verbose \
+            --path "$PROJECT_DIR" \
+            --export-debug "Android" \
+            "$GITHUB_WORKSPACE/build/LastShow.apk"
+
+          test -s "$GITHUB_WORKSPACE/build/LastShow.apk"
+          ls -lh "$GITHUB_WORKSPACE/build/LastShow.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: The-Last-Show-APK
+          path: build/LastShow.apk
+          if-no-files-found: error
+          retention-days: 14
